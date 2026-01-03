@@ -113,6 +113,40 @@ console.log('- Frontend:', frontend.exposedAt);
 ```
 </TypeScriptExample>
 
+## Stable URLs with custom tokens
+
+By default, preview URLs use random 16-character tokens that change when you re-expose ports. For stable URLs across container restarts and deployments, use custom tokens:
+
+<TypeScriptExample>
+```
+// Extract hostname from request
+const { hostname } = new URL(request.url);
+
+// With custom token - URL stays the same across restarts
+const { exposedAt } = await sandbox.exposePort(8080, {
+  hostname,
+  token: 'my-api-server'
+});
+// https://8080-abc123-my-api-server.yourdomain.com
+
+// Without token - URL changes on each re-expose
+const { exposedAt: randomUrl } = await sandbox.exposePort(8081, { hostname });
+// https://8081-abc123-abc123random4567.yourdomain.com
+```
+</TypeScriptExample>
+
+Custom tokens must be 1-63 characters containing only lowercase letters, numbers, hyphens, and underscores.
+
+**When to use custom tokens:**
+- Sharing URLs with users or documentation
+- Webhooks or API callbacks that need stable endpoints
+- Production deployments where URL consistency matters
+
+**When to use random tokens:**
+- Temporary development/testing
+- Internal services
+- Enhanced security through unpredictability
+
 ## Wait for service readiness
 
 Always verify a service is ready before exposing. Use a simple delay for most cases:
@@ -330,10 +364,10 @@ See [Sandbox options - normalizeId](/sandbox/configuration/sandbox-options/#norm
 
 ## Preview URL Format
 
-**Production**: `https://{port}-{sandbox-id}.yourdomain.com`
+**Production**: `https://{port}-{sandbox-id}-{token}.yourdomain.com`
 
-- Port 8080: `https://8080-abc123.yourdomain.com`
-- Port 5173: `https://5173-abc123.yourdomain.com`
+- Port 8080 with random token: `https://8080-abc123-abc123random4567.yourdomain.com`
+- Port 5173 with custom token: `https://5173-abc123-my-frontend.yourdomain.com`
 
 **Local development**: `http://localhost:8787/...`
 
