@@ -1,0 +1,308 @@
+---
+title: File Watching
+pcx_content_type: concept
+sidebar:
+  order: 4
+---
+
+import { TypeScriptExample } from "~/components";
+
+Monitor file system changes in real-time using Linux inotify. File watching allows your application to react to file creation, modification, deletion, and rename events.
+
+## Overview
+
+The file watching API uses Linux `inotify` for efficient, real-time file system event notifications. Events are delivered as they occur, with low overhead and minimal latency.
+
+**Key features**:
+- Real-time notifications for file system changes
+- Recursive directory watching
+- Event filtering by type (create, modify, delete, rename)
+- Pattern-based file filtering with glob patterns
+- Automatic cleanup on sandbox sleep
+
+## Methods
+
+### `watch()`
+
+Start watching a directory for file system changes.
+
+```ts
+const watcher = await sandbox.watch(path: string, options?: WatchOptions): Promise<WatchHandle>
+```
+
+**Parameters**:
+- `path` - Absolute path to watch, or relative to `/workspace`
+- `options` (optional):
+  - `recursive` - Watch subdirectories recursively (default: `true`)
+  - `events` - Event types to watch for (default: all events)
+  - `include` - Glob patterns to include (e.g., `['*.ts', '*.js']`)
+  - `exclude` - Glob patterns to exclude (default: `['.git', 'node_modules', '.DS_Store']`)
+  - `signal` - AbortSignal to cancel the watch
+  - `onEvent` - Callback function for file system events
+  - `onError` - Callback function for errors
+
+**Returns**: `Promise<WatchHandle>` - Handle to stop the watch and access metadata
+
+<TypeScriptExample>
+```
+// Basic usage with callbacks
+const watcher = await sandbox.watch('/workspace/src', {
+  recursive: true,
+  onEvent: (event) => {
+    console.log(`${event.type}: ${event.path}`);
+  },
+  onError: (error) => {
+    console.error('Watch error:', error);
+  }
+});
+
+// Stop watching when done
+await watcher.stop();
+```
+</TypeScriptExample>
+
+## WatchHandle
+
+The `WatchHandle` returned by `watch()` provides methods and properties to manage the file watch.
+
+**Properties**:
+- `id` (readonly) - Unique identifier for this watch
+- `path` (readonly) - The path being watched
+
+**Methods**:
+- `stop()` - Stop watching and clean up resources
+
+<TypeScriptExample>
+```
+const watcher = await sandbox.watch('/workspace/data');
+
+console.log(`Watching ${watcher.path} with ID ${watcher.id}`);
+
+// Stop watching
+await watcher.stop();
+```
+</TypeScriptExample>
+
+## WatchEvent
+
+File system events passed to the `onEvent` callback have the following structure:
+
+```ts
+interface WatchEvent {
+  type: 'create' | 'modify' | 'delete' | 'rename';
+  path: string;
+  isDirectory: boolean;
+}
+```
+
+**Properties**:
+- `type` - The type of change that occurred
+- `path` - Absolute path to the file or directory that changed
+- `isDirectory` - Whether the changed path is a directory
+
+## Examples
+
+### Watch specific file types
+
+Filter events to only TypeScript and JavaScript files:
+
+<TypeScriptExample>
+```
+const watcher = await sandbox.watch('/workspace/src', {
+  include: ['*.ts', '*.js'],
+  onEvent: (event) => {
+    console.log(`Code file ${event.type}: ${event.path}`);
+  }
+});
+```
+</TypeScriptExample>
+
+### Watch with cancellation
+
+Use an `AbortController` to cancel the watch:
+
+<TypeScriptExample>
+```
+const controller = new AbortController();
+
+const watcher = await sandbox.watch('/workspace', {
+  signal: controller.signal,
+  onEvent: (event) => console.log(event)
+});
+
+// Cancel the watch after 5 seconds
+setTimeout(() => controller.abort(), 5000);
+```
+</TypeScriptExample>
+
+### Non-recursive watching
+
+Watch only the top-level directory without subdirectories:
+
+<TypeScriptExample>
+```
+const watcher = await sandbox.watch('/workspace/config', {
+  recursive: false,
+  onEvent: (event) => {
+    console.log(`Config changed: ${event.path}`);
+  }
+});
+```
+</TypeScriptExample>
+
+### Filter by event type
+
+Only receive notifications for specific event types:
+
+<TypeScriptExample>
+```
+const watcher = await sandbox.watch('/workspace/logs', {
+  events: ['create', 'modify'],
+  onEvent: (event) => {
+    // Only receives create and modify events
+    console.log(`Log ${event.type}: ${event.path}`);
+  }
+});
+```
+</TypeScriptExample>
+
+### Multiple watchers
+
+You can have multiple active watches simultaneously:
+
+<TypeScriptExample>
+```
+const srcWatcher = await sandbox.watch('/workspace/src', {
+  include: ['*.ts'],
+  onEvent: (event) => console.log('Source:', event.path)
+});
+
+const testWatcher = await sandbox.watch('/workspace/tests', {
+  include: ['*.test.ts'],
+  onEvent: (event) => console.log('Test:', event.path)
+});
+
+// Stop both watchers
+await srcWatcher.stop();
+await testWatcher.stop();
+```
+</TypeScriptExample>
+
+## Event Types
+
+The following event types are supported:
+
+- `create` - A new file or directory was created
+- `modify` - A file was modified (includes attribute changes)
+- `delete` - A file or directory was deleted
+- `rename` - A file or directory was renamed or moved
+
+:::note[Rename events]
+Rename and move operations may generate two events: a `delete` event at the old path and a `create` event at the new path, depending on whether the operation crosses directory boundaries.
+:::
+
+## Default Exclusions
+
+By default, these patterns are excluded from file watch events to reduce noise:
+- `.git` - Git repository metadata
+- `node_modules` - Node.js dependencies
+- `.DS_Store` - macOS metadata files
+
+You can override these defaults by providing your own `exclude` patterns.
+
+## Best Practices
+
+### Clean up watchers
+
+Always stop watchers when they are no longer needed to free resources:
+
+<TypeScriptExample>
+```
+const watcher = await sandbox.watch('/workspace/src', {
+  onEvent: (event) => console.log(event)
+});
+
+try {
+  // Do work...
+} finally {
+  await watcher.stop();
+}
+```
+</TypeScriptExample>
+
+### Use AbortSignal for automatic cleanup
+
+An `AbortSignal` provides automatic cleanup when your request is cancelled:
+
+<TypeScriptExample>
+```
+export default {
+  async fetch(request, env) {
+    const sandbox = await env.SANDBOX.getInstance();
+
+    // Watch automatically stops when request is aborted
+    const watcher = await sandbox.watch('/workspace', {
+      signal: request.signal,
+      onEvent: (event) => console.log(event)
+    });
+
+    return new Response('Watching...');
+  }
+}
+```
+</TypeScriptExample>
+
+### Filter at the source
+
+Use `include` patterns to filter events early rather than filtering in your callback:
+
+<TypeScriptExample>
+```
+// Good: Filter at the source
+const watcher = await sandbox.watch('/workspace', {
+  include: ['*.ts'],
+  onEvent: (event) => {
+    // Only receives TypeScript file events
+    processTypeScriptFile(event.path);
+  }
+});
+
+// Less efficient: Filter in callback
+const watcher = await sandbox.watch('/workspace', {
+  onEvent: (event) => {
+    if (event.path.endsWith('.ts')) {
+      processTypeScriptFile(event.path);
+    }
+  }
+});
+```
+</TypeScriptExample>
+
+### Handle errors gracefully
+
+Always provide an `onError` callback to handle watch failures:
+
+<TypeScriptExample>
+```
+const watcher = await sandbox.watch('/workspace', {
+  onEvent: (event) => console.log(event),
+  onError: (error) => {
+    console.error('Watch failed:', error.message);
+    // Optionally restart the watch or notify users
+  }
+});
+```
+</TypeScriptExample>
+
+## Limitations
+
+- File watching requires Linux `inotify`, which is available in all sandbox containers
+- Watches are automatically cleaned up when the sandbox enters sleep mode
+- Very high-frequency file changes (hundreds per second) may result in event coalescing
+- Glob patterns in `include` match against filenames only, not full paths
+
+## Related resources
+
+- [Files API](/sandbox/api/files/) - Read, write, and manage files
+- [Commands API](/sandbox/api/commands/) - Execute commands that may trigger file changes
+- [Sessions](/sandbox/concepts/sessions/) - Isolated execution contexts
