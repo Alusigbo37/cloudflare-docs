@@ -142,6 +142,41 @@ With Sandbox, you can execute Python scripts, run Node.js applications, analyze 
 		Connect to WebSocket servers running in sandboxes. Learn more: [WebSocket Connections](/sandbox/guides/websocket-connections/).
 	</TabItem>
 
+	<TabItem label="Interactive Terminal">
+		```typescript
+		import { getSandbox } from '@cloudflare/sandbox';
+
+		export { Sandbox } from '@cloudflare/sandbox';
+
+		export default {
+			async fetch(request: Request, env: Env): Promise<Response> {
+				const sandbox = getSandbox(env.Sandbox, 'user-123');
+
+				// Create an interactive terminal session
+				const terminal = await sandbox.pty.create({
+					cols: 80,
+					rows: 24,
+					command: ['/bin/bash']
+				});
+
+				// Listen for output
+				let output = '';
+				terminal.onData((data) => {
+					output += data;
+				});
+
+				// Send commands
+				await terminal.write('python3\n');
+				await terminal.write('print("Hello from Python!")\n');
+
+				return Response.json({ output });
+			}
+		};
+		```
+
+		Create interactive terminal sessions with PTY support. Learn more: [Terminal Sessions](/sandbox/guides/terminal-sessions/).
+	</TabItem>
+
 </Tabs>
 
 <LinkButton variant="primary" href="/sandbox/get-started/">
@@ -176,6 +211,12 @@ Expose HTTP services running in your sandbox with automatically generated previe
 <Feature header="Execute code directly" href="/sandbox/guides/code-execution/" cta="Learn about code execution">
 
 Execute Python and JavaScript code with rich outputs including charts, tables, and images. Maintain persistent state between executions for AI-generated code and interactive workflows.
+
+</Feature>
+
+<Feature header="Interactive terminal sessions" href="/sandbox/guides/terminal-sessions/" cta="Learn about terminals">
+
+Create interactive terminal sessions with PTY support. Run bash shells, Python REPLs, and terminal-based applications with real-time bidirectional communication.
 
 </Feature>
 

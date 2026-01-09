@@ -1,0 +1,606 @@
+---
+title: Interactive terminal sessions
+pcx_content_type: how-to
+sidebar:
+  order: 7
+---
+
+import { TypeScriptExample, PackageManagers, FileTree } from "~/components";
+
+Interactive terminal sessions (PTY) enable you to run programs that require terminal input/output, such as shells, REPLs, and interactive command-line tools. This guide shows you how to create and manage terminal sessions effectively.
+
+## What are terminal sessions?
+
+Terminal sessions use PTY (pseudo-terminal) technology to provide a full terminal environment within your sandbox. Unlike regular command execution with `exec()`, terminal sessions:
+
+- Support interactive programs that read from stdin
+- Handle terminal control sequences and ANSI colors
+- Maintain persistent session state
+- Allow real-time bidirectional communication
+- Support terminal resizing and signal handling
+
+## Creating your first terminal
+
+Start with a basic bash terminal session:
+
+<TypeScriptExample>
+```typescript
+import { getSandbox } from '@cloudflare/sandbox';
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const sandbox = getSandbox(env.Sandbox, 'terminal-demo');
+    
+    // Create a terminal session
+    const terminal = await sandbox.pty.create({
+      cols: 80,
+      rows: 24,
+      command: ['/bin/bash']
+    });
+    
+    // Set up output handler
+    let output = '';
+    terminal.onData((data) => {
+      output += data;
+    });
+    
+    // Send commands
+    await terminal.write('echo "Hello from terminal!"\n');
+    await terminal.write('pwd\n');
+    await terminal.write('ls -la\n');
+    
+    // Give commands time to execute
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    return Response.json({ output });
+  },
+};
+```
+</TypeScriptExample>
+
+## Building a Python REPL
+
+Create an interactive Python environment that maintains state across commands:
+
+<TypeScriptExample>
+```typescript
+class PythonTerminal {
+  private terminal: any;
+  private outputBuffer = '';
+  
+  async init() {
+    this.terminal = await sandbox.pty.create({
+      cols: 120,
+      rows: 30,
+      command: ['python3', '-u'], // Unbuffered output
+      env: {
+        PYTHONUNBUFFERED: '1',
+        TERM: 'xterm-256color'
+      }
+    });
+    
+    // Capture all output
+    this.terminal.onData((data: string) => {
+      this.outputBuffer += data;
+    });
+    
+    // Wait for Python to start
+    await this.waitForPrompt('>>> ');
+  }
+  
+  async execute(code: string): Promise<string> {
+    const startOutput = this.outputBuffer.length;
+    
+    // Send Python code
+    await this.terminal.write(code + '\n');
+    
+    // Wait for completion
+    await this.waitForPrompt('>>> ');
+    
+    // Extract new output
+    return this.outputBuffer.slice(startOutput);
+  }
+  
+  private async waitForPrompt(prompt: string, timeout = 5000): Promise<void> {
+    const start = Date.now();
+    
+    while (Date.now() - start < timeout) {
+      if (this.outputBuffer.includes(prompt)) {
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    throw new Error('Timeout waiting for Python prompt');
+  }
+  
+  async cleanup() {
+    await this.terminal.kill();
+  }
+}
+
+// Usage example
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const sandbox = getSandbox(env.Sandbox, 'python-repl');
+    const python = new PythonTerminal();
+    
+    try {
+      await python.init();
+      
+      // Execute Python code with persistent state
+      const result1 = await python.execute('import math');
+      const result2 = await python.execute('radius = 5');
+      const result3 = await python.execute('area = math.pi * radius ** 2');
+      const result4 = await python.execute('print(f"Area: {area:.2f}")');
+      
+      return Response.json({
+        success: true,
+        outputs: [result1, result2, result3, result4]
+      });
+    } finally {
+      await python.cleanup();
+    }
+  },
+};
+```
+</TypeScriptExample>
+
+## WebSocket terminal server
+
+Build a real-time terminal that clients can connect to via WebSocket:
+
+<TypeScriptExample>
+```typescript
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    
+    if (url.pathname === '/terminal' && request.headers.get('Upgrade') === 'websocket') {
+      return handleWebSocketTerminal(request, env);
+    }
+    
+    return new Response('WebSocket Terminal Server');
+  },
+};
+
+async function handleWebSocketTerminal(request: Request, env: Env): Promise<Response> {
+  const webSocketPair = new WebSocketPair();
+  const [client, server] = Object.values(webSocketPair);
+  
+  const sandbox = getSandbox(env.Sandbox, 'ws-terminal');
+  let terminal: any = null;
+  
+  server.addEventListener('open', async () => {
+    try {
+      // Create terminal when client connects
+      terminal = await sandbox.pty.create({
+        cols: 80,
+        rows: 24,
+        command: ['/bin/bash'],
+        useWebSocket: true, // Enable WebSocket transport
+      });
+      
+      // Forward terminal output to client
+      terminal.onData((data: string) => {
+        server.send(JSON.stringify({
+          type: 'output',
+          data: data
+        }));
+      });
+      
+      // Handle terminal exit
+      terminal.onExit((exitCode: number) => {
+        server.send(JSON.stringify({
+          type: 'exit',
+          exitCode: exitCode
+        }));
+        server.close();
+      });
+      
+      // Send connection confirmation
+      server.send(JSON.stringify({
+        type: 'connected',
+        message: 'Terminal ready'
+      }));
+      
+    } catch (error) {
+      server.send(JSON.stringify({
+        type: 'error',
+        message: error.message
+      }));
+      server.close();
+    }
+  });
+  
+  server.addEventListener('message', async (event) => {
+    try {
+      const message = JSON.parse(event.data);
+      
+      switch (message.type) {
+        case 'input':
+          if (terminal) {
+            await terminal.write(message.data);
+          }
+          break;
+          
+        case 'resize':
+          if (terminal) {
+            await terminal.resize(message.cols, message.rows);
+          }
+          break;
+          
+        case 'kill':
+          if (terminal) {
+            await terminal.kill(message.signal || 'SIGTERM');
+          }
+          break;
+      }
+    } catch (error) {
+      server.send(JSON.stringify({
+        type: 'error',
+        message: error.message
+      }));
+    }
+  });
+  
+  server.addEventListener('close', async () => {
+    if (terminal) {
+      await terminal.kill();
+    }
+  });
+  
+  return new Response(null, {
+    status: 101,
+    webSocket: client,
+  });
+}
+```
+</TypeScriptExample>
+
+## Session attachment
+
+Attach terminals to existing execution sessions to inherit their environment:
+
+<TypeScriptExample>
+```typescript
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const sandbox = getSandbox(env.Sandbox, 'session-demo');
+    
+    // Create a session and set up environment
+    const session = await sandbox.createSession();
+    await session.setEnvVars({
+      NODE_ENV: 'development',
+      DEBUG: 'true',
+      PROJECT_PATH: '/workspace/app'
+    });
+    
+    // Change to project directory
+    await session.exec('cd /workspace/app');
+    await session.exec('npm install');
+    
+    // Now attach a terminal to this session
+    // It will inherit the environment variables and working directory
+    const terminal = await sandbox.pty.attach(session.id, {
+      cols: 120,
+      rows: 40,
+      command: ['/bin/bash']
+    });
+    
+    // Terminal starts in /workspace/app with all environment variables
+    let output = '';
+    terminal.onData((data) => {
+      output += data;
+    });
+    
+    await terminal.write('pwd\n');
+    await terminal.write('echo $NODE_ENV\n');
+    await terminal.write('echo $PROJECT_PATH\n');
+    
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    return Response.json({ output });
+  },
+};
+```
+</TypeScriptExample>
+
+## Multiple terminal management
+
+Manage multiple concurrent terminal sessions:
+
+<TypeScriptExample>
+```typescript
+class TerminalManager {
+  private terminals: Map<string, any> = new Map();
+  
+  async createTerminal(id: string, options: any): Promise<void> {
+    const terminal = await sandbox.pty.create(options);
+    
+    // Set up logging with terminal ID
+    terminal.onData((data: string) => {
+      console.log(`Terminal ${id}:`, data);
+    });
+    
+    terminal.onExit((exitCode: number) => {
+      console.log(`Terminal ${id} exited with code ${exitCode}`);
+      this.terminals.delete(id);
+    });
+    
+    this.terminals.set(id, terminal);
+  }
+  
+  async sendToTerminal(id: string, data: string): Promise<void> {
+    const terminal = this.terminals.get(id);
+    if (!terminal) {
+      throw new Error(`Terminal ${id} not found`);
+    }
+    
+    await terminal.write(data);
+  }
+  
+  async resizeTerminal(id: string, cols: number, rows: number): Promise<void> {
+    const terminal = this.terminals.get(id);
+    if (!terminal) {
+      throw new Error(`Terminal ${id} not found`);
+    }
+    
+    await terminal.resize(cols, rows);
+  }
+  
+  async killTerminal(id: string, signal = 'SIGTERM'): Promise<void> {
+    const terminal = this.terminals.get(id);
+    if (!terminal) {
+      throw new Error(`Terminal ${id} not found`);
+    }
+    
+    await terminal.kill(signal);
+    this.terminals.delete(id);
+  }
+  
+  async listTerminals(): Promise<string[]> {
+    const ptys = await sandbox.pty.list();
+    return ptys.map(pty => pty.id);
+  }
+  
+  async killAll(): Promise<void> {
+    const promises = Array.from(this.terminals.entries()).map(
+      ([id, terminal]) => terminal.kill()
+    );
+    
+    await Promise.all(promises);
+    this.terminals.clear();
+  }
+}
+
+// Usage in Worker
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const sandbox = getSandbox(env.Sandbox, 'multi-terminal');
+    const manager = new TerminalManager();
+    
+    // Create multiple terminals for different tasks
+    await manager.createTerminal('build', {
+      cols: 120,
+      rows: 30,
+      command: ['/bin/bash'],
+      cwd: '/workspace'
+    });
+    
+    await manager.createTerminal('test', {
+      cols: 80,
+      rows: 24,
+      command: ['/bin/bash'],
+      cwd: '/workspace'
+    });
+    
+    await manager.createTerminal('logs', {
+      cols: 100,
+      rows: 50,
+      command: ['tail', '-f', '/var/log/app.log']
+    });
+    
+    // Send different commands to each
+    await manager.sendToTerminal('build', 'npm run build\n');
+    await manager.sendToTerminal('test', 'npm test\n');
+    
+    return Response.json({
+      message: 'Terminals created and commands sent',
+      terminals: await manager.listTerminals()
+    });
+  },
+};
+```
+</TypeScriptExample>
+
+## Best practices
+
+### Handle terminal output efficiently
+
+<TypeScriptExample>
+```typescript
+// Use a circular buffer for large outputs
+class CircularBuffer {
+  private buffer: string[] = [];
+  private maxSize: number;
+  private index = 0;
+  
+  constructor(maxSize = 1000) {
+    this.maxSize = maxSize;
+  }
+  
+  append(data: string) {
+    if (this.buffer.length < this.maxSize) {
+      this.buffer.push(data);
+    } else {
+      this.buffer[this.index] = data;
+      this.index = (this.index + 1) % this.maxSize;
+    }
+  }
+  
+  getAll(): string {
+    if (this.buffer.length < this.maxSize) {
+      return this.buffer.join('');
+    }
+    
+    // Reconstruct in correct order
+    const tail = this.buffer.slice(this.index);
+    const head = this.buffer.slice(0, this.index);
+    return tail.concat(head).join('');
+  }
+}
+
+const terminal = await sandbox.pty.create({
+  cols: 80,
+  rows: 24
+});
+
+const outputBuffer = new CircularBuffer(1000);
+terminal.onData((data) => {
+  outputBuffer.append(data);
+});
+```
+</TypeScriptExample>
+
+### Wait for specific output patterns
+
+<TypeScriptExample>
+```typescript
+async function waitForPattern(
+  terminal: any,
+  pattern: string | RegExp,
+  timeout = 10000
+): Promise<string> {
+  let buffer = '';
+  let resolved = false;
+  
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        reject(new Error(`Timeout waiting for pattern: ${pattern}`));
+      }
+    }, timeout);
+    
+    const unsubscribe = terminal.onData((data: string) => {
+      buffer += data;
+      
+      const match = typeof pattern === 'string' 
+        ? buffer.includes(pattern)
+        : pattern.test(buffer);
+        
+      if (match && !resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        unsubscribe();
+        resolve(buffer);
+      }
+    });
+  });
+}
+
+// Usage
+const terminal = await sandbox.pty.create({
+  command: ['/bin/bash']
+});
+
+await terminal.write('npm install\n');
+const output = await waitForPattern(terminal, /npm.*added.*packages/);
+```
+</TypeScriptExample>
+
+### Graceful terminal cleanup
+
+<TypeScriptExample>
+```typescript
+class ManagedTerminal {
+  private terminal: any;
+  private cleanedUp = false;
+  
+  constructor(terminal: any) {
+    this.terminal = terminal;
+  }
+  
+  async cleanup(): Promise<void> {
+    if (this.cleanedUp) return;
+    
+    this.cleanedUp = true;
+    
+    try {
+      // Try graceful shutdown first
+      await this.terminal.write('\x03'); // Ctrl+C
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // Then SIGTERM
+      await this.terminal.kill('SIGTERM');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Force kill if still running
+      const ptys = await sandbox.pty.list();
+      const stillRunning = ptys.find(pty => pty.id === this.terminal.id);
+      
+      if (stillRunning) {
+        await this.terminal.kill('SIGKILL');
+      }
+    } catch (error) {
+      console.error('Error during terminal cleanup:', error);
+    }
+  }
+}
+```
+</TypeScriptExample>
+
+## Troubleshooting
+
+### Common issues and solutions
+
+**Problem**: Terminal output appears garbled or with strange characters
+
+**Solution**: Set the TERM environment variable:
+
+<TypeScriptExample>
+```typescript
+const terminal = await sandbox.pty.create({
+  cols: 80,
+  rows: 24,
+  env: {
+    TERM: 'xterm-256color'
+  }
+});
+```
+</TypeScriptExample>
+
+**Problem**: Commands seem to hang or not respond
+
+**Solution**: Check for interactive prompts or use non-interactive modes:
+
+<TypeScriptExample>
+```typescript
+// For commands that might prompt for input
+await terminal.write('yes | apt-get install package\n');
+
+// Or set non-interactive environment
+const terminal = await sandbox.pty.create({
+  env: {
+    DEBIAN_FRONTEND: 'noninteractive'
+  }
+});
+```
+</TypeScriptExample>
+
+**Problem**: Terminal exits unexpectedly
+
+**Solution**: Handle the exit event and check the exit code:
+
+<TypeScriptExample>
+```typescript
+terminal.onExit((exitCode) => {
+  if (exitCode !== 0) {
+    console.error(`Terminal exited with error code: ${exitCode}`);
+  }
+});
+```
+</TypeScriptExample>
+
+Terminal sessions provide powerful capabilities for building interactive development tools, debugging environments, and collaborative coding platforms. Use them when you need full terminal functionality beyond simple command execution.
