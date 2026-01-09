@@ -141,6 +141,7 @@
 	"engines": {
 		"node": ">=22"
 	},
+	"packageManager": "npm@10.9.4",
 	"volta": {
 		"node": "22.9.0"
 	}
