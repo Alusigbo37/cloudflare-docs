@@ -61,8 +61,11 @@ interface CreateMcpHandlerOptions extends WorkerTransportOptions {
 	sessionIdGenerator?: () => string;
 	enableJsonResponse?: boolean;
 	onsessioninitialized?: (sessionId: string) => void;
+	onsessionclosed?: (sessionId: string) => void;
 	corsOptions?: CORSOptions;
 	storage?: MCPStorageApi;
+	eventStore?: EventStore;
+	retryInterval?: number;
 }
 ```
 
@@ -112,9 +115,76 @@ const handler = createMcpHandler(server, { transport });
 
 </TypeScriptExample>
 
+## Using the MCP SDK Directly
+
+For the simplest possible stateless MCP server, you can use the `@modelcontextprotocol/sdk` package directly with `WebStandardStreamableHTTPServerTransport`. This approach does not use the `agents` package and provides zero-config MCP server functionality that works on Cloudflare Workers. View the [complete example on GitHub](https://github.com/cloudflare/agents/tree/main/examples/mcp-server).
+
+<TypeScriptExample>
+
+```ts title="src/index.ts"
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { z } from "zod";
+
+const server = new McpServer({
+	name: "Hello MCP Server",
+	version: "1.0.0",
+});
+
+server.registerTool(
+	"hello",
+	{
+		description: "Returns a greeting message",
+		inputSchema: { name: z.string().optional() },
+	},
+	async ({ name }) => {
+		return {
+			content: [
+				{
+					text: `Hello, ${name ?? "World"}!`,
+					type: "text",
+				},
+			],
+		};
+	},
+);
+
+const transport = new WebStandardStreamableHTTPServerTransport();
+server.connect(transport);
+
+const corsHeaders = {
+	"Access-Control-Allow-Origin": "*",
+	"Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+	"Access-Control-Allow-Headers":
+		"Content-Type, Accept, mcp-session-id, mcp-protocol-version",
+	"Access-Control-Expose-Headers": "mcp-session-id",
+	"Access-Control-Max-Age": "86400",
+};
+
+function withCors(response: Response): Response {
+	for (const [key, value] of Object.entries(corsHeaders)) {
+		response.headers.set(key, value);
+	}
+	return response;
+}
+
+export default {
+	fetch: async (request: Request) => {
+		if (request.method === "OPTIONS") {
+			return new Response(null, { headers: corsHeaders });
+		}
+		return withCors(await transport.handleRequest(request));
+	},
+};
+```
+
+</TypeScriptExample>
+
+This approach is recommended when you need a simple, stateless MCP server without additional features like authentication, state management, or agent capabilities. The server handles CORS automatically and works with any MCP client that supports the `streamable-http` transport.
+
 ## Stateless MCP Servers
 
-Many MCP Servers are stateless, meaning they don't maintain any session state between requests. The `createMcpHandler` function is a lightweight alternative to the `McpAgent` class that can be used to serve an MCP server straight from a Worker. View the [complete example on GitHub](https://github.com/cloudflare/agents/tree/main/examples/mcp-worker).
+Many MCP Servers are stateless, meaning they do not maintain any session state between requests. The `createMcpHandler` function is a lightweight alternative to the `McpAgent` class that can be used to serve an MCP server straight from a Worker. View the [complete example on GitHub](https://github.com/cloudflare/agents/tree/main/examples/mcp-worker).
 
 <TypeScriptExample>
 
@@ -259,6 +329,7 @@ class WorkerTransport implements Transport {
 	): Promise<void>;
 	async start(): Promise<void>;
 	async close(): Promise<void>;
+	closeSSEStream(requestId: RequestId): void;
 }
 ```
 
@@ -286,6 +357,11 @@ interface WorkerTransportOptions {
 	onsessioninitialized?: (sessionId: string) => void;
 
 	/**
+	 * Callback fired when a session is closed via DELETE request.
+	 */
+	onsessionclosed?: (sessionId: string) => void;
+
+	/**
 	 * CORS configuration for cross-origin requests.
 	 * Configures Access-Control-* headers.
 	 */
@@ -297,6 +373,18 @@ interface WorkerTransportOptions {
 	 * so it survives hibernation/restart.
 	 */
 	storage?: MCPStorageApi;
+
+	/**
+	 * Event store for resumability support.
+	 * If provided, enables clients to reconnect and resume messages using Last-Event-ID.
+	 */
+	eventStore?: EventStore;
+
+	/**
+	 * Retry interval in milliseconds to suggest to clients in SSE retry field.
+	 * Controls client reconnection timing for polling behavior.
+	 */
+	retryInterval?: number;
 }
 ```
 
@@ -338,6 +426,23 @@ A callback that fires when a session is initialized, either by creating a new se
 const transport = new WorkerTransport({
 	onsessioninitialized: (sessionId) => {
 		console.log(`MCP session initialized: ${sessionId}`);
+	},
+});
+```
+
+</TypeScriptExample>
+
+#### onsessionclosed
+
+A callback that fires when a session is closed via DELETE request. Use this to clean up resources or log session closures.
+
+<TypeScriptExample>
+
+```ts
+const transport = new WorkerTransport({
+	onsessionclosed: (sessionId) => {
+		console.log(`MCP session closed: ${sessionId}`);
+		// Clean up any resources associated with this session
 	},
 });
 ```
@@ -404,6 +509,90 @@ const transport = new WorkerTransport({
 			await this.ctx.storage.put("mcp-state", state);
 		},
 	},
+});
+```
+
+</TypeScriptExample>
+
+#### eventStore
+
+Optional event store for resumability support. When provided, enables clients to reconnect and resume receiving messages using the `Last-Event-ID` header. This is useful for implementing reliable delivery in long-running operations.
+
+```ts
+interface EventStore {
+	storeEvent(streamId: StreamId, message: JSONRPCMessage): Promise<EventId>;
+	replayEventsAfter(
+		lastEventId: EventId,
+		options: {
+			send: (eventId: EventId, message: JSONRPCMessage) => Promise<void>;
+		},
+	): Promise<StreamId>;
+	getStreamIdForEventId?(eventId: EventId): Promise<StreamId | undefined>;
+}
+```
+
+<TypeScriptExample>
+
+```ts
+const transport = new WorkerTransport({
+	eventStore: {
+		storeEvent: async (streamId, message) => {
+			const eventId = crypto.randomUUID();
+			await env.EVENTS.put(`${streamId}:${eventId}`, JSON.stringify(message));
+			return eventId;
+		},
+		replayEventsAfter: async (lastEventId, { send }) => {
+			// Fetch and replay events after lastEventId
+			// Return the stream ID
+		},
+	},
+});
+```
+
+</TypeScriptExample>
+
+#### retryInterval
+
+Retry interval in milliseconds to suggest to clients in the SSE `retry` field. Controls how often clients should attempt to reconnect when connections are lost. Useful for implementing polling behavior during long-running operations.
+
+<TypeScriptExample>
+
+```ts
+const transport = new WorkerTransport({
+	retryInterval: 5000, // Clients will reconnect every 5 seconds
+});
+```
+
+</TypeScriptExample>
+
+#### Methods
+
+##### closeSSEStream
+
+Close an SSE stream for a specific request, triggering client reconnection. Use this to implement polling behavior during long-running operations. The client will reconnect after the retry interval specified in the priming event.
+
+```ts
+closeSSEStream(requestId: RequestId): void;
+```
+
+<TypeScriptExample>
+
+```ts
+const transport = new WorkerTransport({
+	retryInterval: 3000, // Client will reconnect every 3 seconds
+});
+
+// In your MCP tool handler:
+server.tool("longOperation", "Start a long-running operation", {}, async () => {
+	// Start async work
+	const requestId = getCurrentRequestId(); // Get from context
+
+	// Close the stream to trigger client reconnection
+	transport.closeSSEStream(requestId);
+
+	return {
+		content: [{ type: "text", text: "Operation started, polling for updates..." }],
+	};
 });
 ```
 
